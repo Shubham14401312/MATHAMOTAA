@@ -117,9 +117,10 @@ function adminOnly(req, res, next) {
 }
 
 function serializeMessage(message) {
+  const clientChatId = [String(message.senderId), String(message.receiverId)].sort().join(":");
   return {
     message_ID: message.id,
-    chatId: message.chatId,
+    chatId: clientChatId,
     sender_ID: message.senderId,
     reciever_ID: message.receiverId,
     type: message.kind || "text",

@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { clearAuthState, loadAuthState, loadCachedState, saveAuthState, saveCachedState } from "../lib/cache.js";
 import { mockChats, mockCurrentUser, mockMessages } from "../mockData.js";
-import { createDirectChat } from "../services/api.js";
 import { setApiToken } from "../services/api.js";
 
 const cached = loadCachedState();
@@ -42,15 +41,13 @@ export const useChatStore = create((set, get) => ({
   mobileChatOpen: false,
   installPromptEvent: null,
   typingByChat: {},
-  roomState: null,
   initialize(payload) {
     const nextState = {
       currentUser: payload.currentUser,
       usersDirectory: payload.usersDirectory || [],
       chatsList: payload.chatsList,
       activeChatId: payload.activeChatId || payload.chatsList[0]?.id || null,
-      messagesByChat: payload.messagesByChat,
-      roomState: payload.roomState || get().roomState || null
+      messagesByChat: payload.messagesByChat
     };
     set(nextState);
     persist({ ...get(), ...nextState });
@@ -77,8 +74,7 @@ export const useChatStore = create((set, get) => ({
       chatsList: [],
       activeChatId: null,
       messagesByChat: {},
-      mobileChatOpen: false,
-      roomState: null
+      mobileChatOpen: false
     });
     persist({
       ...get(),
@@ -86,8 +82,7 @@ export const useChatStore = create((set, get) => ({
       usersDirectory: [],
       chatsList: [],
       activeChatId: null,
-      messagesByChat: {},
-      roomState: null
+      messagesByChat: {}
     });
   },
   setUsersDirectory(usersDirectory) {
@@ -115,11 +110,6 @@ export const useChatStore = create((set, get) => ({
   setInstallPromptEvent(installPromptEvent) {
     set({ installPromptEvent });
   },
-  setRoomState(roomState) {
-    set((state) => ({
-      roomState: typeof roomState === "function" ? roomState(state.roomState) : roomState
-    }));
-  },
   updateCurrentUser(patch) {
     const state = get();
     const nextCurrentUser = {
@@ -130,47 +120,45 @@ export const useChatStore = create((set, get) => ({
     saveAuthState({ token: state.authToken, user: nextCurrentUser });
     persist({ ...state, currentUser: nextCurrentUser });
   },
-  async createChat(name) {
+  createChat(name) {
     const state = get();
     const trimmedName = name.trim().toLowerCase();
     if (!trimmedName) return null;
     const targetUser = state.usersDirectory.find((user) => user.username === trimmedName);
     if (!targetUser || !state.currentUser) return null;
-    const existing = state.chatsList.find((chat) => chat.receiverId === targetUser.id);
+    const chatId = [state.currentUser.id, targetUser.id].sort().join(":");
+    const existing = state.chatsList.find((chat) => chat.id === chatId);
     if (existing) {
       set({ activeChatId: existing.id, mobileChatOpen: true });
       return existing.id;
     }
-
-    const chatState = await createDirectChat(targetUser.id);
     const nextChat = {
-      id: chatState.chat.id,
+      id: chatId,
       type: "direct",
-      name: targetUser.name || targetUser.username || "New chat",
+      name: targetUser.name || targetUser.username,
       avatar: targetUser.avatar,
       online: Boolean(targetUser.isOnline),
       unreadCount: 0,
       lastMessage: "Start your conversation",
-      lastMessageAt: chatState.chat.created_at || new Date().toISOString(),
-      participants: [chatState.participants.owner?.id, chatState.participants.partner?.id].filter(Boolean),
+      lastMessageAt: new Date().toISOString(),
+      participants: [state.currentUser.id, targetUser.id],
       receiverId: targetUser.id,
-      username: targetUser.username,
-      inviteCode: chatState.inviteCode
+      username: targetUser.username
     };
     const nextChats = [nextChat, ...state.chatsList];
     const nextMessages = {
       ...state.messagesByChat,
-      [nextChat.id]: []
+      [chatId]: []
     };
     const nextState = {
       chatsList: nextChats,
-      activeChatId: nextChat.id,
+      activeChatId: chatId,
       messagesByChat: nextMessages,
       mobileChatOpen: true
     };
     set(nextState);
     persist({ ...state, ...nextState });
-    return nextChat.id;
+    return chatId;
   },
   selectChat(chatId) {
     const nextChats = get().chatsList.map((chat) =>
@@ -196,16 +184,6 @@ export const useChatStore = create((set, get) => ({
     const nextTyping = { ...state.typingByChat };
     delete nextTyping[chatId];
     set({ typingByChat: nextTyping });
-  },
-  upsertChat(chat) {
-    const state = get();
-    const existingIndex = state.chatsList.findIndex((item) => item.id === chat.id);
-    const nextChats =
-      existingIndex >= 0
-        ? state.chatsList.map((item) => (item.id === chat.id ? { ...item, ...chat } : item))
-        : [chat, ...state.chatsList];
-    set({ chatsList: nextChats });
-    persist({ ...state, chatsList: nextChats });
   },
   appendMessage(message) {
     const state = get();

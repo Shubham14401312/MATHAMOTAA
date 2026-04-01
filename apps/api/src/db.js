@@ -63,6 +63,10 @@ function chatParticipants(state, chat) {
   };
 }
 
+function clientDirectChatId(userA, userB) {
+  return [String(userA), String(userB)].sort().join(":");
+}
+
 function serializeChatState(state, chat, currentUserId) {
   const participants = chatParticipants(state, chat);
   const role =
@@ -250,7 +254,7 @@ export function getMessagesByUserId(userId) {
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .map((message) => ({
       message_ID: message.id,
-      chatId: message.chatId,
+      chatId: clientDirectChatId(message.senderId, message.receiverId),
       sender_ID: message.senderId,
       reciever_ID: message.receiverId,
       type: message.kind || "text",

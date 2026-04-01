@@ -1,6 +1,5 @@
 import {
   CirclePlus,
-  Dices,
   LogOut,
   MessageCircleMore,
   MessageSquareText,
@@ -155,7 +154,7 @@ export default function Sidebar() {
             className="w-full bg-transparent text-sm outline-none placeholder:text-text-muted"
           />
         </label>
-        <div className="mt-3 grid grid-cols-4 gap-2">
+        <div className="mt-3 grid grid-cols-3 gap-2">
           <NavLink
             to="/chat"
             className={({ isActive }) =>
@@ -166,17 +165,6 @@ export default function Sidebar() {
           >
             <MessageSquareText className="h-4 w-4" />
             Chats
-          </NavLink>
-          <NavLink
-            to="/rooms"
-            className={({ isActive }) =>
-              `inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${
-                isActive ? "bg-rose-100 text-rose-900" : "glass-strong text-text-main"
-              }`
-            }
-          >
-            <Dices className="h-4 w-4" />
-            Rooms
           </NavLink>
           <NavLink
             to="/profile"

@@ -57,58 +57,6 @@ export function getUsers() {
   return request("/api/users");
 }
 
-export function getChats() {
-  return request("/api/chats");
-}
-
-export function getChat(chatId) {
-  return request(`/api/chats/${chatId}`);
-}
-
-export function createDirectChat(partnerId) {
-  return request("/api/chats/direct", {
-    method: "POST",
-    body: JSON.stringify({ partnerId })
-  });
-}
-
-export function createRoom(title) {
-  return request("/api/rooms", {
-    method: "POST",
-    body: JSON.stringify({ title })
-  });
-}
-
-export function joinRoom(inviteCode) {
-  return request("/api/rooms/join", {
-    method: "POST",
-    body: JSON.stringify({ inviteCode })
-  });
-}
-
-export function getRoom(chatId) {
-  return request(`/api/rooms/${chatId}`);
-}
-
-export function setRoomToken(chatId, token) {
-  return request(`/api/rooms/${chatId}/token`, {
-    method: "POST",
-    body: JSON.stringify({ token })
-  });
-}
-
-export function rollRoomGame(chatId) {
-  return request(`/api/rooms/${chatId}/roll`, {
-    method: "POST"
-  });
-}
-
-export function resetRoomGame(chatId) {
-  return request(`/api/rooms/${chatId}/reset`, {
-    method: "POST"
-  });
-}
-
 export function getOfflineMessages(userId) {
   return request(`/messages/${userId}`);
 }
