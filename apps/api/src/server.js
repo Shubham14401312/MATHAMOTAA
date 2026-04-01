@@ -29,6 +29,14 @@ import { getOrCreateGame, playMiniLudo, playTicTacToe } from "./gameState.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+});
+
+process.on("unhandledRejection", (error) => {
+  console.error("Unhandled rejection:", error);
+});
+
 fs.mkdirSync(config.uploadDir, { recursive: true });
 
 const __filename = fileURLToPath(import.meta.url);
@@ -101,7 +109,7 @@ function adminOnly(req, res, next) {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, app: "MATHAMOTA" });
+  res.json({ ok: true, app: "MATHAMOTA", uptime: process.uptime() });
 });
 
 app.post("/auth/start", (req, res) => {
@@ -252,6 +260,8 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(config.port, () => {
-  console.log(`MATHAMOTA API listening on http://localhost:${config.port}`);
+server.listen(config.port, "0.0.0.0", () => {
+  console.log(`MATHAMOTA API listening on 0.0.0.0:${config.port}`);
+  console.log(`Static build directory: ${webDistDir}`);
+  console.log(`Static build present: ${fs.existsSync(path.join(webDistDir, "index.html"))}`);
 });

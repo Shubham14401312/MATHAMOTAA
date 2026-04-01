@@ -1,53 +1,35 @@
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
-import Database from "better-sqlite3";
 import { v4 as uuid } from "uuid";
 import { config } from "./config.js";
 
-fs.mkdirSync(config.uploadDir, { recursive: true });
-
-const db = new Database(config.dbPath);
-db.pragma("journal_mode = WAL");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    invite_code TEXT UNIQUE NOT NULL,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS chats (
-    id TEXT PRIMARY KEY,
-    owner_id TEXT NOT NULL,
-    partner_id TEXT,
-    title TEXT NOT NULL,
-    wallpaper TEXT DEFAULT 'aurora',
-    gallery_visible INTEGER DEFAULT 1,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    chat_id TEXT NOT NULL,
-    sender_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    body TEXT,
-    attachment_url TEXT,
-    attachment_name TEXT,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS admin_audit (
-    id TEXT PRIMARY KEY,
-    action TEXT NOT NULL,
-    detail TEXT,
-    created_at TEXT NOT NULL
-  );
-`);
+const dbFilePath = path.join(config.storageDir, "db.json");
 
 function now() {
   return new Date().toISOString();
+}
+
+function ensureStorage() {
+  fs.mkdirSync(config.uploadDir, { recursive: true });
+  if (!fs.existsSync(dbFilePath)) {
+    const initialState = {
+      users: [],
+      chats: [],
+      messages: [],
+      adminAudit: []
+    };
+    fs.writeFileSync(dbFilePath, JSON.stringify(initialState, null, 2));
+  }
+}
+
+function readState() {
+  ensureStorage();
+  return JSON.parse(fs.readFileSync(dbFilePath, "utf8"));
+}
+
+function writeState(state) {
+  fs.writeFileSync(dbFilePath, JSON.stringify(state, null, 2));
 }
 
 function cryptoInvite() {
@@ -55,102 +37,116 @@ function cryptoInvite() {
 }
 
 export function createUser(name) {
+  const state = readState();
   const user = {
     id: uuid(),
     name,
     inviteCode: cryptoInvite(),
     createdAt: now()
   };
-  db.prepare(
-    `INSERT INTO users (id, name, invite_code, created_at) VALUES (@id, @name, @inviteCode, @createdAt)`
-  ).run(user);
+  state.users.push(user);
+  writeState(state);
   return user;
 }
 
 export function createChat({ ownerId, title }) {
+  const state = readState();
   const chat = {
     id: uuid(),
-    ownerId,
+    owner_id: ownerId,
+    partner_id: null,
     title,
-    createdAt: now()
+    wallpaper: "aurora",
+    gallery_visible: 1,
+    created_at: now()
   };
-  db.prepare(
-    `INSERT INTO chats (id, owner_id, title, created_at) VALUES (@id, @ownerId, @title, @createdAt)`
-  ).run(chat);
+  state.chats.push(chat);
+  writeState(state);
   return chat;
 }
 
 export function joinChatByInvite({ inviteCode, partnerId }) {
-  const owner = db.prepare(`SELECT * FROM users WHERE invite_code = ?`).get(inviteCode);
+  const state = readState();
+  const owner = state.users.find((user) => user.inviteCode === inviteCode || user.invite_code === inviteCode);
   if (!owner) return null;
-  const chat = db.prepare(`SELECT * FROM chats WHERE owner_id = ?`).get(owner.id);
+  const chat = state.chats.find((item) => item.owner_id === owner.id);
   if (!chat) return null;
-  db.prepare(`UPDATE chats SET partner_id = ? WHERE id = ?`).run(partnerId, chat.id);
-  return db.prepare(`SELECT * FROM chats WHERE id = ?`).get(chat.id);
+  chat.partner_id = partnerId;
+  writeState(state);
+  return chat;
 }
 
 export function getChat(chatId) {
-  return db.prepare(`SELECT * FROM chats WHERE id = ?`).get(chatId);
+  const state = readState();
+  return state.chats.find((chat) => chat.id === chatId) || null;
 }
 
 export function getUserById(id) {
-  return db.prepare(`SELECT * FROM users WHERE id = ?`).get(id);
+  const state = readState();
+  return state.users.find((user) => user.id === id) || null;
 }
 
 export function getMessages(chatId) {
-  return db
-    .prepare(
-      `SELECT id, chat_id as chatId, sender_id as senderId, kind, body, attachment_url as attachmentUrl, attachment_name as attachmentName, created_at as createdAt
-       FROM messages WHERE chat_id = ? ORDER BY created_at ASC`
-    )
-    .all(chatId);
+  const state = readState();
+  return state.messages
+    .filter((message) => message.chatId === chatId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 export function insertMessage(message) {
+  const state = readState();
   const payload = {
     id: uuid(),
     createdAt: now(),
     ...message
   };
-  db.prepare(
-    `INSERT INTO messages (id, chat_id, sender_id, kind, body, attachment_url, attachment_name, created_at)
-     VALUES (@id, @chatId, @senderId, @kind, @body, @attachmentUrl, @attachmentName, @createdAt)`
-  ).run(payload);
+  state.messages.push(payload);
+  writeState(state);
   return payload;
 }
 
 export function updateChatPrefs(chatId, prefs) {
-  db.prepare(
-    `UPDATE chats
-     SET wallpaper = COALESCE(@wallpaper, wallpaper),
-         gallery_visible = COALESCE(@galleryVisible, gallery_visible)
-     WHERE id = @chatId`
-  ).run({
-    chatId,
-    wallpaper: prefs.wallpaper ?? null,
-    galleryVisible:
-      typeof prefs.galleryVisible === "boolean" ? Number(prefs.galleryVisible) : null
-  });
-  return getChat(chatId);
+  const state = readState();
+  const chat = state.chats.find((item) => item.id === chatId);
+  if (!chat) return null;
+  if (prefs.wallpaper !== undefined) chat.wallpaper = prefs.wallpaper;
+  if (typeof prefs.galleryVisible === "boolean") {
+    chat.gallery_visible = Number(prefs.galleryVisible);
+  }
+  writeState(state);
+  return chat;
 }
 
 export function getAdminOverview() {
-  const users = db.prepare(`SELECT COUNT(*) as count FROM users`).get().count;
-  const chats = db.prepare(`SELECT COUNT(*) as count FROM chats`).get().count;
-  const messages = db.prepare(`SELECT COUNT(*) as count FROM messages`).get().count;
-  const recentMessages = db
-    .prepare(
-      `SELECT m.body, m.kind, m.created_at as createdAt, u.name as sender
-       FROM messages m
-       JOIN users u ON u.id = m.sender_id
-       ORDER BY m.created_at DESC LIMIT 10`
-    )
-    .all();
-  return { users, chats, messages, recentMessages };
+  const state = readState();
+  const recentMessages = [...state.messages]
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 10)
+    .map((message) => {
+      const sender = state.users.find((user) => user.id === message.senderId);
+      return {
+        body: message.body,
+        kind: message.kind,
+        createdAt: message.createdAt,
+        sender: sender?.name || "Unknown"
+      };
+    });
+
+  return {
+    users: state.users.length,
+    chats: state.chats.length,
+    messages: state.messages.length,
+    recentMessages
+  };
 }
 
 export function writeAdminAudit(action, detail) {
-  db.prepare(
-    `INSERT INTO admin_audit (id, action, detail, created_at) VALUES (?, ?, ?, ?)`
-  ).run(uuid(), action, detail, now());
+  const state = readState();
+  state.adminAudit.push({
+    id: uuid(),
+    action,
+    detail,
+    createdAt: now()
+  });
+  writeState(state);
 }
