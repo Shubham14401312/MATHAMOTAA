@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+@theme {
+  --color-chat-bg: #efeae2;
+  --color-panel: #ffffff;
+  --color-panel-muted: #f0f2f5;
+  --color-sidebar: #f7f8fa;
+  --color-accent: #25d366;
+  --color-accent-dark: #1ea952;
+  --color-border-soft: #e9edef;
+  --color-message-sent: #d9fdd3;
+  --color-message-received: #ffffff;
+  --color-text-main: #111b21;
+  --color-text-muted: #667781;
+  --color-unread: #25d366;
+  --font-sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-chat-bg font-sans text-text-main antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-slate-300;
+}
+
+.whatsapp-pattern {
+  background-color: #efeae2;
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.55) 1px, transparent 1px),
+    radial-gradient(rgba(255, 255, 255, 0.35) 1px, transparent 1px);
+  background-position: 0 0, 12px 12px;
+  background-size: 24px 24px;
+}
+
+.emoji-font {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
