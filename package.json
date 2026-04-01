@@ -2,6 +2,10 @@
   "name": "mathamota",
   "private": true,
   "version": "1.0.0",
+  "engines": {
+    "node": "24.x",
+    "npm": "10.x"
+  },
   "workspaces": [
     "apps/api",
     "apps/web"
