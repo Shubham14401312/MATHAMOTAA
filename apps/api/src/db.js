@@ -13,13 +13,19 @@ function now() {
 function ensureStorage() {
   fs.mkdirSync(config.uploadDir, { recursive: true });
   if (!fs.existsSync(dbFilePath)) {
-    const initialState = {
-      users: [],
-      chats: [],
-      messages: [],
-      adminAudit: []
-    };
-    fs.writeFileSync(dbFilePath, JSON.stringify(initialState, null, 2));
+    fs.writeFileSync(
+      dbFilePath,
+      JSON.stringify(
+        {
+          users: [],
+          chats: [],
+          messages: [],
+          adminAudit: []
+        },
+        null,
+        2
+      )
+    );
   }
 }
 
@@ -32,31 +38,83 @@ function writeState(state) {
   fs.writeFileSync(dbFilePath, JSON.stringify(state, null, 2));
 }
 
-function cryptoInvite() {
+function cryptoCode() {
   return crypto.randomBytes(4).toString("hex").toUpperCase();
 }
 
-export function createUser(name) {
+function normalizeUser(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    avatar: user.avatar || "Bloom",
+    tokenPiece: user.tokenPiece || "\u2728",
+    createdAt: user.createdAt
+  };
+}
+
+function chatParticipants(state, chat) {
+  return {
+    owner: normalizeUser(state.users.find((user) => user.id === chat.owner_id)),
+    partner: normalizeUser(state.users.find((user) => user.id === chat.partner_id))
+  };
+}
+
+export function getUserByEmail(email) {
+  const state = readState();
+  return state.users.find((user) => user.email.toLowerCase() === email.toLowerCase()) || null;
+}
+
+export function createUser({ email, passwordHash, name, avatar = "Bloom", tokenPiece = "\u2728" }) {
   const state = readState();
   const user = {
     id: uuid(),
+    email,
+    passwordHash,
     name,
-    inviteCode: cryptoInvite(),
+    avatar,
+    tokenPiece,
     createdAt: now()
   };
   state.users.push(user);
   writeState(state);
-  return user;
+  return normalizeUser(user);
+}
+
+export function updateUserProfile(userId, profile) {
+  const state = readState();
+  const user = state.users.find((item) => item.id === userId);
+  if (!user) return null;
+  if (profile.name) user.name = profile.name;
+  if (profile.avatar) user.avatar = profile.avatar;
+  if (profile.tokenPiece) user.tokenPiece = profile.tokenPiece;
+  writeState(state);
+  return normalizeUser(user);
+}
+
+export function getUserById(id) {
+  const state = readState();
+  const user = state.users.find((item) => item.id === id);
+  return normalizeUser(user);
+}
+
+export function getPrimaryChatByUserId(userId) {
+  const state = readState();
+  return state.chats.find((chat) => chat.owner_id === userId || chat.partner_id === userId) || null;
 }
 
 export function createChat({ ownerId, title }) {
   const state = readState();
+  const existing = state.chats.find((chat) => chat.owner_id === ownerId);
+  if (existing) return existing;
   const chat = {
     id: uuid(),
+    inviteCode: cryptoCode(),
     owner_id: ownerId,
     partner_id: null,
     title,
-    wallpaper: "aurora",
+    wallpaper: "blush",
     gallery_visible: 1,
     created_at: now()
   };
@@ -65,15 +123,27 @@ export function createChat({ ownerId, title }) {
   return chat;
 }
 
-export function joinChatByInvite({ inviteCode, partnerId }) {
+export function joinChatByInvite({ inviteCode, userId }) {
   const state = readState();
-  const owner = state.users.find((user) => user.inviteCode === inviteCode || user.invite_code === inviteCode);
-  if (!owner) return null;
-  const chat = state.chats.find((item) => item.owner_id === owner.id);
-  if (!chat) return null;
-  chat.partner_id = partnerId;
+  const chat = state.chats.find((item) => item.inviteCode === inviteCode);
+  if (!chat) return { error: "INVITE_NOT_FOUND" };
+  const currentMembership = state.chats.find(
+    (item) =>
+      (item.owner_id === userId || item.partner_id === userId) &&
+      item.id !== chat.id
+  );
+  if (currentMembership) {
+    return { error: "ALREADY_IN_ROOM" };
+  }
+  if (chat.owner_id === userId || chat.partner_id === userId) {
+    return { chat };
+  }
+  if (chat.partner_id) {
+    return { error: "ROOM_FULL" };
+  }
+  chat.partner_id = userId;
   writeState(state);
-  return chat;
+  return { chat };
 }
 
 export function getChat(chatId) {
@@ -81,9 +151,19 @@ export function getChat(chatId) {
   return state.chats.find((chat) => chat.id === chatId) || null;
 }
 
-export function getUserById(id) {
+export function getChatState(chatId, currentUserId) {
   const state = readState();
-  return state.users.find((user) => user.id === id) || null;
+  const chat = state.chats.find((item) => item.id === chatId);
+  if (!chat) return null;
+  const participants = chatParticipants(state, chat);
+  const role =
+    currentUserId === chat.owner_id ? "owner" : currentUserId === chat.partner_id ? "partner" : "guest";
+  return {
+    chat,
+    inviteCode: chat.inviteCode,
+    participants,
+    role
+  };
 }
 
 export function getMessages(chatId) {

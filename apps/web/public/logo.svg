@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="MATHAMOTA logo">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f26ca7"/>
+      <stop offset="100%" stop-color="#ffb68c"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="160" rx="42" fill="#fff7fb"/>
+  <circle cx="80" cy="80" r="56" fill="url(#g)" opacity="0.16"/>
+  <path d="M80 121C54 102 38 85 38 64c0-12 9-22 21-22 8 0 15 4 21 11 6-7 13-11 21-11 12 0 21 10 21 22 0 21-16 38-42 57Z" fill="url(#g)"/>
+  <text x="80" y="147" text-anchor="middle" font-size="18" font-family="Trebuchet MS, Segoe UI, sans-serif" fill="#b7447f">M</text>
+</svg>

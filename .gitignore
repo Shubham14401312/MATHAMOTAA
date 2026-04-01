@@ -7,4 +7,5 @@ build
 coverage
 apps/api/storage/uploads
 apps/api/storage/db.json
+apps/api/public
 *.log
