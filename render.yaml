@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     buildCommand: npm install --include=dev && npm run build
-    startCommand: npm run start
+    startCommand: node apps/api/src/server.js
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV

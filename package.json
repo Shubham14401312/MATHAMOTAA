@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "engines": {
-    "node": "24.x",
+    "node": "22.x",
     "npm": "10.x"
   },
   "workspaces": [
@@ -16,7 +16,7 @@
     "dev:web": "npm --workspace apps/web run dev",
     "build": "npm --workspace apps/web run build",
     "build:all": "npm run build",
-    "start": "npm --workspace apps/api run start",
+    "start": "node apps/api/src/server.js",
     "hash-admin": "node apps/api/src/security.js",
     "serve": "npm run start"
   },
