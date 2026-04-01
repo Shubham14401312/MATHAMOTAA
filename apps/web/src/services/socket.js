@@ -76,6 +76,13 @@ export function connectSocket({ token, onStatus, onEvent }) {
     });
   });
 
+  socket.on("room:state", (room) => {
+    onEvent({
+      type: "room:state",
+      room
+    });
+  });
+
   return {
     close() {
       socket.close();
@@ -93,7 +100,16 @@ export function connectSocket({ token, onStatus, onEvent }) {
         });
       }
       if (payload.type === "message:send") {
-        socket.emit("message:send", payload);
+        socket.emit("sendMessage", payload);
+      }
+      if (payload.type === "room:join") {
+        socket.emit("room:join", payload, payload.onResult);
+      }
+      if (payload.type === "game:roll") {
+        socket.emit("game:roll", payload, payload.onResult);
+      }
+      if (payload.type === "game:reset") {
+        socket.emit("game:reset", payload, payload.onResult);
       }
     }
   };

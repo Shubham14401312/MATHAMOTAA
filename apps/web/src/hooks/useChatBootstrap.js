@@ -1,12 +1,13 @@
 import { useEffect } from "react";
-import { getCurrentUser, getOfflineMessages, getUsers } from "../services/api.js";
+import { getChat, getChats, getCurrentUser, getOfflineMessages, getUsers } from "../services/api.js";
 import { connectSocket } from "../services/socket.js";
 import { useChatStore } from "../store/chatStore.js";
 
-function normalizeMessages(rawMessages, currentUserId, usersDirectory) {
+function normalizeMessages(rawMessages) {
   const grouped = {};
   for (const entry of rawMessages) {
-    const chatId = entry.chatId || [entry.sender_ID, entry.reciever_ID].sort().join(":");
+    const chatId = entry.chatId;
+    if (!chatId) continue;
     const message = {
       id: entry.message_ID || crypto.randomUUID(),
       chatId,
@@ -23,11 +24,18 @@ function normalizeMessages(rawMessages, currentUserId, usersDirectory) {
     grouped[chatId].push(message);
   }
 
-  const chatsList = Object.entries(grouped).map(([chatId, messages]) => {
-    const ordered = [...messages].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-    const last = ordered.at(-1);
-    const counterpartId = last.senderId === currentUserId ? last.receiverId : last.senderId;
-    const counterpart = usersDirectory.find((user) => user.id === counterpartId);
+  return grouped;
+}
+
+function normalizeChats(chatStates, groupedMessages, currentUserId) {
+  return chatStates.map((entry) => {
+    const chatId = entry.chat.id;
+    const messages = [...(groupedMessages[chatId] || [])].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const counterpart =
+      entry.participants.owner?.id === currentUserId ? entry.participants.partner : entry.participants.owner;
+    const counterpartId = counterpart?.id || entry.participants.owner?.id || entry.participants.partner?.id || chatId;
+    const last = messages.at(-1);
+
     return {
       id: chatId,
       type: "direct",
@@ -35,15 +43,18 @@ function normalizeMessages(rawMessages, currentUserId, usersDirectory) {
       avatar: counterpart?.avatar || `https://api.dicebear.com/9.x/initials/svg?seed=${counterpartId}`,
       online: Boolean(counterpart?.isOnline),
       unreadCount: 0,
-      lastMessage: last.text || last.type,
-      lastMessageAt: last.timestamp,
-      participants: [currentUserId, counterpartId],
+      lastMessage: last?.text || last?.type || "Start your conversation",
+      lastMessageAt: last?.timestamp || entry.chat.created_at,
+      participants: [entry.participants.owner?.id, entry.participants.partner?.id].filter(Boolean),
       receiverId: counterpartId,
-      username: counterpart?.username || counterpartId
+      username: counterpart?.username || counterpartId,
+      inviteCode: entry.inviteCode
     };
   });
+}
 
-  return { chatsList, messagesByChat: grouped };
+function normalizeChat(entry, currentUserId, groupedMessages) {
+  return normalizeChats([entry], groupedMessages, currentUserId)[0];
 }
 
 export function useChatBootstrap() {
@@ -59,6 +70,8 @@ export function useChatBootstrap() {
     setError,
     setTyping,
     clearTyping,
+    setRoomState,
+    upsertChat,
     updateUserPresence
   } = useChatStore();
 
@@ -71,19 +84,22 @@ export function useChatBootstrap() {
 
     async function bootstrap() {
       try {
-        const [freshUser, usersDirectory, offlineMessages] = await Promise.all([
+        const [freshUser, usersDirectory, offlineMessages, chatStates] = await Promise.all([
           getCurrentUser(),
           getUsers(),
-          getOfflineMessages(currentUser.id)
+          getOfflineMessages(currentUser.id),
+          getChats()
         ]);
         if (disposed) return;
-        const normalized = normalizeMessages(offlineMessages, freshUser.id, usersDirectory.filter((user) => user.id !== freshUser.id));
+        const filteredUsers = usersDirectory.filter((user) => user.id !== freshUser.id);
+        const groupedMessages = normalizeMessages(offlineMessages);
+        const chatsList = normalizeChats(chatStates, groupedMessages, freshUser.id);
         initialize({
           currentUser: freshUser,
-          usersDirectory: usersDirectory.filter((user) => user.id !== freshUser.id),
-          chatsList: normalized.chatsList,
-          messagesByChat: normalized.messagesByChat,
-          activeChatId: normalized.chatsList[0]?.id || null
+          usersDirectory: filteredUsers,
+          chatsList,
+          messagesByChat: groupedMessages,
+          activeChatId: chatsList[0]?.id || null
         });
       } catch {
         setError("Unable to load your chat data right now.");
@@ -92,8 +108,24 @@ export function useChatBootstrap() {
       activeSocket = connectSocket({
         token: authToken,
         onStatus: setSocketState,
-        onEvent(payload) {
+        async onEvent(payload) {
           if (payload.type === "message:new" && payload.message) {
+            const stateBeforeAppend = useChatStore.getState();
+            if (!stateBeforeAppend.chatsList.some((chat) => chat.id === payload.message.chatId)) {
+              try {
+                const chatState = await getChat(payload.message.chatId);
+                const normalizedChat = normalizeChat(
+                  chatState,
+                  useChatStore.getState().currentUser.id,
+                  useChatStore.getState().messagesByChat
+                );
+                if (normalizedChat) {
+                  upsertChat(normalizedChat);
+                }
+              } catch {
+                // Leave the message cached even if chat metadata fetch fails.
+              }
+            }
             appendMessage(payload.message);
           }
           if (payload.type === "message:receipt" && payload.messageId) {
@@ -115,6 +147,9 @@ export function useChatBootstrap() {
           }
           if (payload.type === "user:status" && payload.userId) {
             updateUserPresence(payload.userId, payload.isOnline, payload.lastSeen);
+          }
+          if (payload.type === "room:state" && payload.room) {
+            setRoomState(payload.room);
           }
         }
       });
@@ -140,6 +175,8 @@ export function useChatBootstrap() {
     setSocketSend,
     setSocketState,
     setTyping,
+    setRoomState,
+    upsertChat,
     updateMessageStatus,
     updateUserPresence
   ]);

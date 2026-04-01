@@ -6,6 +6,7 @@ import { useChatStore } from "./store/chatStore.js";
 import AuthPage from "./pages/AuthPage.jsx";
 import ChatPage from "./pages/ChatPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
+import RoomPage from "./pages/RoomPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
 
 function ProtectedRoute({ children }) {
@@ -40,6 +41,7 @@ export default function App() {
         >
           <Route path="/" element={<Navigate to="/chat" replace />} />
           <Route path="/chat" element={<ChatPage />} />
+          <Route path="/rooms" element={<RoomPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>

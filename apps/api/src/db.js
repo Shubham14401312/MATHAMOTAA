@@ -63,6 +63,19 @@ function chatParticipants(state, chat) {
   };
 }
 
+function serializeChatState(state, chat, currentUserId) {
+  const participants = chatParticipants(state, chat);
+  const role =
+    currentUserId === chat.owner_id ? "owner" : currentUserId === chat.partner_id ? "partner" : "guest";
+
+  return {
+    chat,
+    inviteCode: chat.inviteCode,
+    participants,
+    role
+  };
+}
+
 export function getUserByEmail(email) {
   const state = readState();
   return state.users.find((user) => (user.email || "").toLowerCase() === email.toLowerCase()) || null;
@@ -126,6 +139,14 @@ export function setUserPresence(userId, isOnline) {
 export function getPrimaryChatByUserId(userId) {
   const state = readState();
   return state.chats.find((chat) => chat.owner_id === userId || chat.partner_id === userId) || null;
+}
+
+export function getChatsByUserId(userId) {
+  const state = readState();
+  return state.chats
+    .filter((chat) => chat.owner_id === userId || chat.partner_id === userId)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .map((chat) => serializeChatState(state, chat, userId));
 }
 
 export function getOrCreateDirectChatByUsers(userA, userB) {
@@ -206,15 +227,7 @@ export function getChatState(chatId, currentUserId) {
   const state = readState();
   const chat = state.chats.find((item) => item.id === chatId);
   if (!chat) return null;
-  const participants = chatParticipants(state, chat);
-  const role =
-    currentUserId === chat.owner_id ? "owner" : currentUserId === chat.partner_id ? "partner" : "guest";
-  return {
-    chat,
-    inviteCode: chat.inviteCode,
-    participants,
-    role
-  };
+  return serializeChatState(state, chat, currentUserId);
 }
 
 export function getMessages(chatId) {

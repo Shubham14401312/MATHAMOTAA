@@ -15,20 +15,23 @@ import { v4 as uuid } from "uuid";
 import { config } from "./config.js";
 import { verifyPassword } from "./security.js";
 import {
+  createChat,
   createUser,
   getAdminOverview,
+  getChatState,
+  getChatsByUserId,
   getAllUsers,
   getMessagesByUserId,
   getOrCreateDirectChatByUsers,
-  getPrimaryChatByUserId,
-  getUserByEmail,
   getUserById,
   getUserByUsername,
   insertMessage,
+  joinChatByInvite,
   setUserPresence,
   updateUserProfile,
   writeAdminAudit
 } from "./db.js";
+import { getLudoState, resetLudo, rollLudo, syncLudoPlayers, updatePlayerToken } from "./gameState.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
@@ -134,7 +137,69 @@ function serializeMessage(message) {
 }
 
 function receiverSocketId(userId) {
-  return connectedUsers.get(String(userId));
+  const sockets = connectedUsers.get(String(userId));
+  if (!sockets?.size) return null;
+  return [...sockets][0];
+}
+
+function receiverSocketIds(userId) {
+  return [...(connectedUsers.get(String(userId)) || [])];
+}
+
+function emitToUser(userId, event, payload) {
+  receiverSocketIds(userId).forEach((socketId) => {
+    io.to(socketId).emit(event, payload);
+  });
+}
+
+function joinUserSocketsToRoom(userId, roomId) {
+  receiverSocketIds(userId).forEach((socketId) => {
+    io.sockets.sockets.get(socketId)?.join(roomId);
+  });
+}
+
+function addConnectedUser(userId, socketId) {
+  const key = String(userId);
+  const sockets = connectedUsers.get(key) || new Set();
+  sockets.add(socketId);
+  connectedUsers.set(key, sockets);
+}
+
+function removeConnectedUser(userId, socketId) {
+  const key = String(userId);
+  const sockets = connectedUsers.get(key);
+  if (!sockets) return 0;
+  sockets.delete(socketId);
+  if (!sockets.size) {
+    connectedUsers.delete(key);
+    return 0;
+  }
+  connectedUsers.set(key, sockets);
+  return sockets.size;
+}
+
+function ensureRoomAccess(chatId, userId) {
+  const chatState = getChatState(chatId, userId);
+  if (!chatState) {
+    return { error: { status: 404, message: "Room not found." } };
+  }
+  if (chatState.role === "guest") {
+    return { error: { status: 403, message: "You are not a member of this room." } };
+  }
+  return { chatState };
+}
+
+function emitRoomState(chatId) {
+  const ownerState = getChatState(chatId, null);
+  if (!ownerState) return null;
+  const game = getLudoState(ownerState);
+  io.to(`room:${chatId}`).emit("room:state", {
+    chat: ownerState.chat,
+    inviteCode: ownerState.inviteCode,
+    participants: ownerState.participants,
+    game
+  });
+  return game;
 }
 
 app.get("/health", (_req, res) => {
@@ -215,6 +280,117 @@ app.get("/api/users", auth, (_req, res) => {
   return res.status(200).json(getAllUsers());
 });
 
+app.get("/api/chats", auth, (req, res) => {
+  return res.json(getChatsByUserId(req.user.userId));
+});
+
+app.get("/api/chats/:chatId", auth, (req, res) => {
+  const chatState = getChatState(req.params.chatId, req.user.userId);
+  if (!chatState) {
+    return res.status(404).json({ error: "Chat not found." });
+  }
+  if (chatState.role === "guest") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  return res.json(chatState);
+});
+
+app.post("/api/chats/direct", auth, (req, res) => {
+  const partnerId = String(req.body?.partnerId || "");
+  if (!partnerId) {
+    return res.status(400).json({ error: "partnerId is required." });
+  }
+  if (partnerId === req.user.userId) {
+    return res.status(400).json({ error: "You cannot create a chat with yourself." });
+  }
+  const partner = getUserById(partnerId);
+  if (!partner) {
+    return res.status(404).json({ error: "User not found." });
+  }
+  const chat = getOrCreateDirectChatByUsers(req.user.userId, partnerId);
+  joinUserSocketsToRoom(req.user.userId, `room:${chat.id}`);
+  joinUserSocketsToRoom(partnerId, `room:${chat.id}`);
+  return res.json(getChatState(chat.id, req.user.userId));
+});
+
+app.post("/api/rooms", auth, (req, res) => {
+  const title = String(req.body?.title || "Private room").trim();
+  const chat = createChat({
+    ownerId: req.user.userId,
+    title: title || "Private room"
+  });
+  joinUserSocketsToRoom(req.user.userId, `room:${chat.id}`);
+  return res.status(201).json(getChatState(chat.id, req.user.userId));
+});
+
+app.post("/api/rooms/join", auth, (req, res) => {
+  const inviteCode = String(req.body?.inviteCode || "").trim().toUpperCase();
+  if (!inviteCode) {
+    return res.status(400).json({ error: "inviteCode is required." });
+  }
+  const result = joinChatByInvite({ inviteCode, userId: req.user.userId });
+  if (result.error === "INVITE_NOT_FOUND") {
+    return res.status(404).json({ error: "Invite code not found." });
+  }
+  if (result.error === "ALREADY_IN_ROOM") {
+    return res.status(409).json({ error: "You are already connected to a different room." });
+  }
+  if (result.error === "ROOM_FULL") {
+    return res.status(409).json({ error: "That room is already full." });
+  }
+
+  const chatState = getChatState(result.chat.id, req.user.userId);
+  joinUserSocketsToRoom(req.user.userId, `room:${result.chat.id}`);
+  syncLudoPlayers(chatState);
+  emitRoomState(result.chat.id);
+  return res.json(chatState);
+});
+
+app.get("/api/rooms/:chatId", auth, (req, res) => {
+  const access = ensureRoomAccess(req.params.chatId, req.user.userId);
+  if (access.error) {
+    return res.status(access.error.status).json({ error: access.error.message });
+  }
+  return res.json({
+    ...access.chatState,
+    game: getLudoState(access.chatState)
+  });
+});
+
+app.post("/api/rooms/:chatId/token", auth, (req, res) => {
+  const access = ensureRoomAccess(req.params.chatId, req.user.userId);
+  if (access.error) {
+    return res.status(access.error.status).json({ error: access.error.message });
+  }
+  const token = String(req.body?.token || "").trim();
+  if (!token) {
+    return res.status(400).json({ error: "token is required." });
+  }
+  const game = updatePlayerToken(access.chatState, req.user.userId, token);
+  emitRoomState(req.params.chatId);
+  return res.json({ game });
+});
+
+app.post("/api/rooms/:chatId/roll", auth, (req, res) => {
+  const access = ensureRoomAccess(req.params.chatId, req.user.userId);
+  if (access.error) {
+    return res.status(access.error.status).json({ error: access.error.message });
+  }
+  const game = rollLudo(access.chatState, req.user.userId);
+  emitRoomState(req.params.chatId);
+  return res.json({ game });
+});
+
+app.post("/api/rooms/:chatId/reset", auth, (req, res) => {
+  const access = ensureRoomAccess(req.params.chatId, req.user.userId);
+  if (access.error) {
+    return res.status(access.error.status).json({ error: access.error.message });
+  }
+  const game = resetLudo(access.chatState, req.user.userId);
+  emitRoomState(req.params.chatId);
+  return res.json({ game });
+});
+
 app.get("/messages/:userId", auth, (req, res) => {
   if (req.params.userId !== req.user.userId) {
     return res.status(403).json({ error: "Forbidden" });
@@ -251,9 +427,9 @@ app.post("/messages", auth, (req, res) => {
   const socketId = receiverSocketId(receiverId);
   if (socketId) {
     message.status = "delivered";
-    io.to(socketId).emit("receiveMessage", serializeMessage(message));
-    io.to(socketId).emit("messageStatus", { messageId: message.id, status: "delivered" });
-    io.to(receiverSocketId(senderId)).emit("messageStatus", { messageId: message.id, status: "delivered" });
+    emitToUser(receiverId, "receiveMessage", serializeMessage(message));
+    emitToUser(receiverId, "messageStatus", { messageId: message.id, status: "delivered" });
+    emitToUser(senderId, "messageStatus", { messageId: message.id, status: "delivered" });
   }
 
   return res.status(200).json({
@@ -349,14 +525,21 @@ io.use((socket, next) => {
 
 io.on("connection", async (socket) => {
   const userId = String(socket.user.userId);
-  connectedUsers.set(userId, socket.id);
-  const presence = setUserPresence(userId, true);
-  io.emit("userStatusUpdate", { userId, isOnline: true, lastSeen: presence?.lastSeen || new Date().toISOString() });
+  addConnectedUser(userId, socket.id);
+  socket.join(`user:${userId}`);
+  getChatsByUserId(userId).forEach((chatState) => {
+    socket.join(`room:${chatState.chat.id}`);
+  });
 
-  socket.on("sendMessage", async (data, callback = () => {}) => {
+  if (receiverSocketIds(userId).length === 1) {
+    const presence = setUserPresence(userId, true);
+    io.emit("userStatusUpdate", { userId, isOnline: true, lastSeen: presence?.lastSeen || new Date().toISOString() });
+  }
+
+  async function handleSendMessage(data, callback = () => {}) {
     try {
-      const receiverId = String(data?.receiverId || "");
-      const content = String(data?.content || "").trim();
+      const receiverId = String(data?.receiverId || data?.reciever_ID || "");
+      const content = String(data?.content || data?.text || "").trim();
       if (!receiverId || !content) {
         callback({ status: "error", error: "receiverId and content are required" });
         return;
@@ -377,38 +560,77 @@ io.on("connection", async (socket) => {
       callback({ status: "sent", message: serializeMessage(message) });
       socket.emit("messageStatus", { messageId: message.id, status: "sent" });
 
-      const targetSocketId = receiverSocketId(receiverId);
-      if (targetSocketId) {
-        io.to(targetSocketId).emit("receiveMessage", serializeMessage({ ...message, status: "delivered" }));
-        socket.emit("messageStatus", { messageId: message.id, status: "delivered" });
+      if (receiverSocketIds(receiverId).length) {
+        emitToUser(receiverId, "receiveMessage", serializeMessage({ ...message, status: "delivered" }));
+        emitToUser(userId, "messageStatus", { messageId: message.id, status: "delivered" });
       }
     } catch {
       callback({ status: "error", error: "Failed to send message" });
     }
+  }
+
+  socket.on("sendMessage", handleSendMessage);
+
+  socket.on("message:send", (data, callback = () => {}) => {
+    handleSendMessage(data, callback);
   });
 
   socket.on("typing", (data) => {
-    const targetSocketId = receiverSocketId(data?.receiverId);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("userTyping", { senderId: userId });
-    }
+    emitToUser(data?.receiverId, "userTyping", { senderId: userId });
   });
 
   socket.on("chat:read", ({ senderId }) => {
-    const targetSocketId = receiverSocketId(senderId);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("messageStatus", { senderId: userId, status: "read" });
+    emitToUser(senderId, "messageStatus", { senderId: userId, status: "read" });
+  });
+
+  socket.on("room:join", ({ chatId }, callback = () => {}) => {
+    const access = ensureRoomAccess(chatId, userId);
+    if (access.error) {
+      callback({ status: "error", error: access.error.message });
+      return;
     }
+    socket.join(`room:${chatId}`);
+    callback({
+      status: "joined",
+      room: {
+        ...access.chatState,
+        game: getLudoState(access.chatState)
+      }
+    });
+  });
+
+  socket.on("game:roll", ({ chatId }, callback = () => {}) => {
+    const access = ensureRoomAccess(chatId, userId);
+    if (access.error) {
+      callback({ status: "error", error: access.error.message });
+      return;
+    }
+    const game = rollLudo(access.chatState, userId);
+    emitRoomState(chatId);
+    callback({ status: "ok", game });
+  });
+
+  socket.on("game:reset", ({ chatId }, callback = () => {}) => {
+    const access = ensureRoomAccess(chatId, userId);
+    if (access.error) {
+      callback({ status: "error", error: access.error.message });
+      return;
+    }
+    const game = resetLudo(access.chatState, userId);
+    emitRoomState(chatId);
+    callback({ status: "ok", game });
   });
 
   socket.on("disconnect", async () => {
-    connectedUsers.delete(userId);
-    const presence = setUserPresence(userId, false);
-    io.emit("userStatusUpdate", {
-      userId,
-      isOnline: false,
-      lastSeen: presence?.lastSeen || new Date().toISOString()
-    });
+    const remainingConnections = removeConnectedUser(userId, socket.id);
+    if (!remainingConnections) {
+      const presence = setUserPresence(userId, false);
+      io.emit("userStatusUpdate", {
+        userId,
+        isOnline: false,
+        lastSeen: presence?.lastSeen || new Date().toISOString()
+      });
+    }
   });
 });
 
