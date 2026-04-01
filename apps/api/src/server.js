@@ -9,28 +9,26 @@ import compression from "compression";
 import multer from "multer";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
+import bcrypt from "bcryptjs";
 import { Server } from "socket.io";
 import { v4 as uuid } from "uuid";
 import { config } from "./config.js";
-import { hashPassword, verifyPassword } from "./security.js";
+import { verifyPassword } from "./security.js";
 import {
-  createChat,
   createUser,
   getAdminOverview,
-  getChatState,
-  getMessages,
+  getAllUsers,
   getMessagesByUserId,
   getOrCreateDirectChatByUsers,
   getPrimaryChatByUserId,
   getUserByEmail,
   getUserById,
+  getUserByUsername,
   insertMessage,
-  joinChatByInvite,
-  updateChatPrefs,
+  setUserPresence,
   updateUserProfile,
   writeAdminAudit
 } from "./db.js";
-import { getLudoState, resetLudo, rollLudo, syncLudoPlayers, updatePlayerToken } from "./gameState.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
@@ -47,7 +45,6 @@ fs.mkdirSync(config.uploadDir, { recursive: true });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const webDistDir = path.resolve(__dirname, "..", "public");
-
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -64,25 +61,26 @@ const upload = multer({
   }
 });
 
+const connectedUsers = new Map();
+
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cors({ origin: config.clientOrigin, credentials: true }));
 app.use(compression());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "8mb" }));
 app.use("/uploads", express.static(config.uploadDir));
 app.use(express.static(webDistDir));
 
 function issueToken(user) {
   return jwt.sign(
     {
-      sub: user.id,
-      email: user.email,
+      userId: user.id,
+      username: user.username,
       name: user.name,
       avatar: user.avatar,
-      tokenPiece: user.tokenPiece,
       role: "user"
     },
     config.jwtSecret,
-    { expiresIn: "30d" }
+    { expiresIn: "7d" }
   );
 }
 
@@ -115,176 +113,130 @@ function adminOnly(req, res, next) {
   return next();
 }
 
-function attachActiveChat(userId) {
-  const activeChat = getPrimaryChatByUserId(userId);
-  if (!activeChat) return null;
-  return getChatState(activeChat.id, userId);
+function serializeMessage(message) {
+  return {
+    message_ID: message.id,
+    chatId: message.chatId,
+    sender_ID: message.senderId,
+    reciever_ID: message.receiverId,
+    type: message.kind || "text",
+    text: message.body || "",
+    media_object: message.attachmentUrl
+      ? {
+          url: message.attachmentUrl,
+          name: message.attachmentName || message.kind
+        }
+      : message.media_object || null,
+    document: message.attachmentName || message.document || null,
+    status: message.status || "sent",
+    timestamp: message.createdAt
+  };
+}
+
+function receiverSocketId(userId) {
+  return connectedUsers.get(String(userId));
 }
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, app: "MATHAMOTA", uptime: process.uptime() });
 });
 
-app.post("/auth/signup", (req, res) => {
-  const name = String(req.body?.name || "").trim();
-  const email = String(req.body?.email || "").trim().toLowerCase();
-  const password = String(req.body?.password || "");
-  const avatar = String(req.body?.avatar || "Bloom").trim();
-  const tokenPiece = String(req.body?.tokenPiece || "\u2728").trim();
+app.post("/api/register", async (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
+    const avatar = String(req.body?.avatar || `https://api.dicebear.com/9.x/initials/svg?seed=${username || "user"}`);
 
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: "Name, email, and password are required." });
-  }
-  if (getUserByEmail(email)) {
-    return res.status(409).json({ error: "This email already has an account. Please log in." });
-  }
+    if (!username || !password) {
+      return res.status(400).json({ error: "Username and password are required." });
+    }
+    if (getUserByUsername(username)) {
+      return res.status(409).json({ error: "Username already taken." });
+    }
 
-  const user = createUser({
-    email,
-    passwordHash: hashPassword(password),
-    name,
-    avatar,
-    tokenPiece
-  });
-  writeAdminAudit("user_signup", email);
-  return res.json({
-    token: issueToken(user),
-    user
-  });
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = createUser({
+      username,
+      passwordHash,
+      avatar,
+      name: username
+    });
+    writeAdminAudit("user_register", username);
+    return res.status(201).json({
+      message: "User registered successfully",
+      token: issueToken(user),
+      userId: user.id,
+      user
+    });
+  } catch {
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
-app.post("/auth/login", (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
-  const password = String(req.body?.password || "");
-  const userRecord = getUserByEmail(email);
-  if (!userRecord || !verifyPassword(password, userRecord.passwordHash)) {
-    return res.status(401).json({ error: "Invalid email or password." });
-  }
+app.post("/api/login", async (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
+    const userRecord = getUserByUsername(username);
 
-  const user = getUserById(userRecord.id);
-  const activeChat = attachActiveChat(user.id);
-  return res.json({
-    token: issueToken(user),
-    user,
-    activeChat,
-    notice: activeChat ? "You were already signed in, so the app brought you back to your room." : ""
-  });
+    if (!userRecord) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    const valid = userRecord.passwordHash?.startsWith("$2")
+      ? await bcrypt.compare(password, userRecord.passwordHash)
+      : verifyPassword(password, userRecord.passwordHash || "");
+
+    if (!valid) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    const user = getUserById(userRecord.id);
+    return res.status(200).json({
+      token: issueToken(user),
+      userId: user.id,
+      username: user.username,
+      user
+    });
+  } catch {
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
-app.get("/auth/me", auth, (req, res) => {
-  const user = getUserById(req.user.sub);
+app.get("/api/me", auth, (req, res) => {
+  const user = getUserById(req.user.userId);
   if (!user) {
-    return res.status(404).json({ error: "User not found." });
+    return res.status(404).json({ error: "User not found" });
   }
-  return res.json({
-    user,
-    activeChat: attachActiveChat(user.id)
-  });
+  return res.json(user);
 });
 
-app.post("/rooms/create", auth, (req, res) => {
-  const title = String(req.body?.title || "Our room").trim();
-  const chat = createChat({ ownerId: req.user.sub, title });
-  const chatState = getChatState(chat.id, req.user.sub);
-  writeAdminAudit("chat_created", `${req.user.email} created ${chat.id}`);
-  return res.json(chatState);
+app.get("/api/users", auth, (_req, res) => {
+  return res.status(200).json(getAllUsers());
 });
 
-app.post("/rooms/join", auth, (req, res) => {
-  const inviteCode = String(req.body?.inviteCode || "").trim().toUpperCase();
-  if (!inviteCode) {
-    return res.status(400).json({ error: "Invite code is required." });
+app.get("/messages/:userId", auth, (req, res) => {
+  if (req.params.userId !== req.user.userId) {
+    return res.status(403).json({ error: "Forbidden" });
   }
-
-  const joinResult = joinChatByInvite({ inviteCode, userId: req.user.sub });
-  if (joinResult.error === "INVITE_NOT_FOUND") {
-    return res.status(404).json({ error: "Invite code not found." });
-  }
-  if (joinResult.error === "ROOM_FULL") {
-    return res.status(409).json({ error: "This private room already has two people." });
-  }
-  if (joinResult.error === "ALREADY_IN_ROOM") {
-    return res.status(409).json({ error: "This account is already inside another room." });
-  }
-
-  const chatState = getChatState(joinResult.chat.id, req.user.sub);
-  writeAdminAudit("chat_joined", `${req.user.email} joined ${joinResult.chat.id}`);
-  return res.json(chatState);
+  return res.json(getMessagesByUserId(req.params.userId));
 });
 
-app.get("/chat/:chatId/state", auth, (req, res) => {
-  const chatState = getChatState(req.params.chatId, req.user.sub);
-  if (!chatState) {
-    return res.status(404).json({ error: "Chat not found." });
-  }
-  syncLudoPlayers(chatState);
-  return res.json({
-    ...chatState,
-    messages: getMessages(req.params.chatId),
-    ludo: getLudoState(chatState)
-  });
-});
-
-app.post("/profile", auth, (req, res) => {
-  const updatedUser = updateUserProfile(req.user.sub, req.body || {});
-  if (!updatedUser) {
-    return res.status(404).json({ error: "User not found." });
-  }
-  return res.json({
-    user: updatedUser,
-    token: issueToken(updatedUser)
-  });
-});
-
-app.post("/chat/:chatId/preferences", auth, (req, res) => {
-  const updated = updateChatPrefs(req.params.chatId, req.body || {});
-  return res.json(updated);
-});
-
-app.post("/chat/:chatId/upload", auth, upload.single("file"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "File is required." });
-  }
-  const ext = path.extname(req.file.originalname);
-  const finalName = `${uuid()}${ext}`;
-  const finalPath = path.join(config.uploadDir, finalName);
-  fs.renameSync(req.file.path, finalPath);
-  const attachmentUrl = `${config.publicAppUrl.replace(/\/$/, "")}/uploads/${finalName}`;
-  const message = insertMessage({
-    chatId: req.params.chatId,
-    senderId: req.user.sub,
-    kind: "file",
-    body: req.body?.caption || "",
-    attachmentUrl,
-    attachmentName: req.file.originalname
-  });
-  io.to(req.params.chatId).emit("message:new", {
-    ...message,
-    senderName: getUserById(req.user.sub)?.name || req.user.name
-  });
-  return res.json(message);
-});
-
-app.post("/messages", (req, res) => {
-  const senderId = String(req.body?.sender_ID || "");
+app.post("/messages", auth, (req, res) => {
+  const senderId = req.user.userId;
   const receiverId = String(req.body?.reciever_ID || "");
   const type = String(req.body?.type || "text");
   const text = String(req.body?.text || "");
   const mediaObject = req.body?.media_object || null;
   const document = req.body?.document || null;
-  const requestedChatId = String(req.body?.chatId || "");
 
-  if (!senderId || !receiverId) {
-    return res.status(400).json({ error: "sender_ID and reciever_ID are required." });
+  if (!receiverId) {
+    return res.status(400).json({ error: "reciever_ID is required." });
   }
 
-  let chatId = requestedChatId;
-  if (!chatId) {
-    chatId = getOrCreateDirectChatByUsers(senderId, receiverId).id;
-  }
-
+  const chat = getOrCreateDirectChatByUsers(senderId, receiverId);
   const message = insertMessage({
-    chatId,
+    chatId: chat.id,
     senderId,
     receiverId,
     kind: type,
@@ -296,19 +248,21 @@ app.post("/messages", (req, res) => {
     status: "sent"
   });
 
-  io.to(chatId).emit("message:new", message);
-  return res.json({
-    ok: true,
-    chatId,
-    messageId: message.id
+  const socketId = receiverSocketId(receiverId);
+  if (socketId) {
+    message.status = "delivered";
+    io.to(socketId).emit("receiveMessage", serializeMessage(message));
+    io.to(socketId).emit("messageStatus", { messageId: message.id, status: "delivered" });
+    io.to(receiverSocketId(senderId)).emit("messageStatus", { messageId: message.id, status: "delivered" });
+  }
+
+  return res.status(200).json({
+    status: "sent",
+    message: serializeMessage(message)
   });
 });
 
-app.get("/messages/:userId", (req, res) => {
-  return res.json(getMessagesByUserId(req.params.userId));
-});
-
-app.post("/v1/media", upload.single("file"), (req, res) => {
+app.post("/v1/media", auth, upload.single("file"), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "File is required." });
   }
@@ -322,11 +276,11 @@ app.post("/v1/media", upload.single("file"), (req, res) => {
     ok: true,
     file_id: finalName,
     id: finalName,
-    url: `${config.publicAppUrl.replace(/\/$/, "")}/v1/media/public/${finalName}`
+    url: `${config.publicAppUrl.replace(/\/$/, "")}/v1/media/${req.user.userId}/${finalName}`
   });
 });
 
-app.get("/v1/media/:userId/:fileId", (req, res) => {
+app.get("/v1/media/:userId/:fileId", auth, (req, res) => {
   const filePath = path.join(config.uploadDir, req.params.fileId);
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: "File not found." });
@@ -334,12 +288,15 @@ app.get("/v1/media/:userId/:fileId", (req, res) => {
   return res.sendFile(filePath);
 });
 
-app.get("/v1/media/public/:fileId", (req, res) => {
-  const filePath = path.join(config.uploadDir, req.params.fileId);
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: "File not found." });
+app.post("/profile", auth, (req, res) => {
+  const updatedUser = updateUserProfile(req.user.userId, req.body || {});
+  if (!updatedUser) {
+    return res.status(404).json({ error: "User not found." });
   }
-  return res.sendFile(filePath);
+  return res.json({
+    user: updatedUser,
+    token: issueToken(updatedUser)
+  });
 });
 
 app.post("/auth/admin", (req, res) => {
@@ -360,12 +317,13 @@ app.get("/admin/overview", auth, adminOnly, (_req, res) => {
 
 app.get("*", (req, res, next) => {
   if (
-    req.path.startsWith("/auth") ||
-    req.path.startsWith("/rooms") ||
-    req.path.startsWith("/chat") ||
+    req.path.startsWith("/api") ||
+    req.path.startsWith("/messages") ||
+    req.path.startsWith("/v1") ||
     req.path.startsWith("/admin") ||
-    req.path.startsWith("/uploads") ||
+    req.path.startsWith("/auth") ||
     req.path.startsWith("/profile") ||
+    req.path.startsWith("/uploads") ||
     req.path.startsWith("/socket.io")
   ) {
     return next();
@@ -380,90 +338,76 @@ app.get("*", (req, res, next) => {
 io.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
-    if (token) {
-      socket.data.user = jwt.verify(token, config.jwtSecret);
-      return next();
-    }
-    socket.data.user = {
-      sub: String(socket.handshake.query?.userId || "guest-user"),
-      name: String(socket.handshake.query?.name || "Partner")
-    };
+    if (!token) return next(new Error("Authentication error"));
+    const decoded = jwt.verify(token, config.jwtSecret);
+    socket.user = decoded;
     next();
   } catch {
-    next(new Error("Unauthorized"));
+    next(new Error("Authentication error"));
   }
 });
 
-io.on("connection", (socket) => {
-  socket.on("room:join", ({ chatId }) => {
-    const chatState = getChatState(chatId, socket.data.user.sub);
-    socket.join(chatId);
-    if (!chatState) {
-      socket.emit("room:snapshot", {
-        chat: { id: chatId, title: "Private chat" },
-        inviteCode: "",
-        participants: {},
-        role: "guest",
-        messages: [],
-        ludo: null
+io.on("connection", async (socket) => {
+  const userId = String(socket.user.userId);
+  connectedUsers.set(userId, socket.id);
+  const presence = setUserPresence(userId, true);
+  io.emit("userStatusUpdate", { userId, isOnline: true, lastSeen: presence?.lastSeen || new Date().toISOString() });
+
+  socket.on("sendMessage", async (data, callback = () => {}) => {
+    try {
+      const receiverId = String(data?.receiverId || "");
+      const content = String(data?.content || "").trim();
+      if (!receiverId || !content) {
+        callback({ status: "error", error: "receiverId and content are required" });
+        return;
+      }
+
+      const chat = getOrCreateDirectChatByUsers(userId, receiverId);
+      const message = insertMessage({
+        chatId: chat.id,
+        senderId: userId,
+        receiverId,
+        kind: "text",
+        body: content,
+        attachmentUrl: null,
+        attachmentName: null,
+        status: "sent"
       });
-      return;
+
+      callback({ status: "sent", message: serializeMessage(message) });
+      socket.emit("messageStatus", { messageId: message.id, status: "sent" });
+
+      const targetSocketId = receiverSocketId(receiverId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("receiveMessage", serializeMessage({ ...message, status: "delivered" }));
+        socket.emit("messageStatus", { messageId: message.id, status: "delivered" });
+      }
+    } catch {
+      callback({ status: "error", error: "Failed to send message" });
     }
-    syncLudoPlayers(chatState);
-    socket.emit("room:snapshot", {
-      ...chatState,
-      messages: getMessages(chatId),
-      ludo: getLudoState(chatState)
-    });
-    socket.to(chatId).emit("room:meta", {
-      ...getChatState(chatId, socket.data.user.sub),
-      ludo: getLudoState(chatState)
-    });
   });
 
-  socket.on("typing", ({ chatId, name }) => {
-    socket.to(chatId).emit("typing", { name });
+  socket.on("typing", (data) => {
+    const targetSocketId = receiverSocketId(data?.receiverId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("userTyping", { senderId: userId });
+    }
   });
 
-  socket.on("message:send", ({ chatId, body, kind = "text" }) => {
-    if (!body?.trim()) return;
-    const sender = getUserById(socket.data.user.sub);
-    const message = insertMessage({
-      chatId,
-      senderId: socket.data.user.sub,
-      kind,
-      body,
-      attachmentUrl: null,
-      attachmentName: null
-    });
-    io.to(chatId).emit("message:new", {
-      ...message,
-      senderName: sender?.name || socket.data.user.name
-    });
+  socket.on("chat:read", ({ senderId }) => {
+    const targetSocketId = receiverSocketId(senderId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("messageStatus", { senderId: userId, status: "read" });
+    }
   });
 
-  socket.on("game:ludo:roll", ({ chatId }) => {
-    const chatState = getChatState(chatId, socket.data.user.sub);
-    if (!chatState) return;
-    const ludo = rollLudo(chatState, socket.data.user.sub);
-    io.to(chatId).emit("game:ludo", ludo);
-  });
-
-  socket.on("game:ludo:reset", ({ chatId }) => {
-    const chatState = getChatState(chatId, socket.data.user.sub);
-    if (!chatState) return;
-    const ludo = resetLudo(chatState, socket.data.user.sub);
-    io.to(chatId).emit("game:ludo", ludo);
-  });
-
-  socket.on("game:ludo:token", ({ chatId, tokenPiece }) => {
-    updateUserProfile(socket.data.user.sub, { tokenPiece });
-    const chatState = getChatState(chatId, socket.data.user.sub);
-    if (!chatState) return;
-    const ludo = updatePlayerToken(chatState, socket.data.user.sub, tokenPiece);
-    io.to(chatId).emit("room:meta", {
-      ...getChatState(chatId, socket.data.user.sub),
-      ludo
+  socket.on("disconnect", async () => {
+    connectedUsers.delete(userId);
+    const presence = setUserPresence(userId, false);
+    io.emit("userStatusUpdate", {
+      userId,
+      isOnline: false,
+      lastSeen: presence?.lastSeen || new Date().toISOString()
     });
   });
 });

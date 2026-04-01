@@ -1,10 +1,9 @@
 import { useEffect } from "react";
-import { getOfflineMessages } from "../services/api.js";
+import { getCurrentUser, getOfflineMessages, getUsers } from "../services/api.js";
 import { connectSocket } from "../services/socket.js";
-import { mockChats, mockCurrentUser, mockMessages } from "../mockData.js";
 import { useChatStore } from "../store/chatStore.js";
 
-function normalizeMessages(rawMessages, currentUserId) {
+function normalizeMessages(rawMessages, currentUserId, usersDirectory) {
   const grouped = {};
   for (const entry of rawMessages) {
     const chatId = entry.chatId || [entry.sender_ID, entry.reciever_ID].sort().join(":");
@@ -27,17 +26,20 @@ function normalizeMessages(rawMessages, currentUserId) {
   const chatsList = Object.entries(grouped).map(([chatId, messages]) => {
     const ordered = [...messages].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     const last = ordered.at(-1);
-    const counterpart = last.senderId === currentUserId ? last.receiverId : last.senderId;
+    const counterpartId = last.senderId === currentUserId ? last.receiverId : last.senderId;
+    const counterpart = usersDirectory.find((user) => user.id === counterpartId);
     return {
       id: chatId,
       type: "direct",
-      name: `Contact ${counterpart}`,
-      avatar: `https://api.dicebear.com/9.x/initials/svg?seed=${counterpart}`,
-      online: false,
+      name: counterpart?.name || counterpart?.username || `User ${counterpartId}`,
+      avatar: counterpart?.avatar || `https://api.dicebear.com/9.x/initials/svg?seed=${counterpartId}`,
+      online: Boolean(counterpart?.isOnline),
       unreadCount: 0,
       lastMessage: last.text || last.type,
       lastMessageAt: last.timestamp,
-      participants: [currentUserId, counterpart]
+      participants: [currentUserId, counterpartId],
+      receiverId: counterpartId,
+      username: counterpart?.username || counterpartId
     };
   });
 
@@ -46,7 +48,9 @@ function normalizeMessages(rawMessages, currentUserId) {
 
 export function useChatBootstrap() {
   const {
+    authToken,
     currentUser,
+    isAuthenticated,
     initialize,
     appendMessage,
     updateMessageStatus,
@@ -54,55 +58,63 @@ export function useChatBootstrap() {
     setSocketState,
     setError,
     setTyping,
-    clearTyping
+    clearTyping,
+    updateUserPresence
   } = useChatStore();
 
   useEffect(() => {
+    if (!isAuthenticated || !authToken || !currentUser?.id) return undefined;
+
     let activeSocket;
+    let disposed = false;
+    const typingTimeouts = new Map();
 
     async function bootstrap() {
       try {
-        const offlineMessages = await getOfflineMessages(currentUser.id);
-        const normalized = normalizeMessages(offlineMessages, currentUser.id);
-        if (normalized.chatsList.length) {
-          initialize({
-            currentUser,
-            chatsList: normalized.chatsList,
-            messagesByChat: normalized.messagesByChat,
-            activeChatId: normalized.chatsList[0].id
-          });
-        } else {
-          initialize({
-            currentUser: mockCurrentUser,
-            chatsList: mockChats,
-            messagesByChat: mockMessages,
-            activeChatId: mockChats[0].id
-          });
-        }
-      } catch {
+        const [freshUser, usersDirectory, offlineMessages] = await Promise.all([
+          getCurrentUser(),
+          getUsers(),
+          getOfflineMessages(currentUser.id)
+        ]);
+        if (disposed) return;
+        const normalized = normalizeMessages(offlineMessages, freshUser.id, usersDirectory.filter((user) => user.id !== freshUser.id));
         initialize({
-          currentUser: mockCurrentUser,
-          chatsList: mockChats,
-          messagesByChat: mockMessages,
-          activeChatId: mockChats[0].id
+          currentUser: freshUser,
+          usersDirectory: usersDirectory.filter((user) => user.id !== freshUser.id),
+          chatsList: normalized.chatsList,
+          messagesByChat: normalized.messagesByChat,
+          activeChatId: normalized.chatsList[0]?.id || null
         });
-        setError("Backend is unavailable, so cached or demo chat data is shown.");
+      } catch {
+        setError("Unable to load your chat data right now.");
       }
 
       activeSocket = connectSocket({
-        userId: currentUser.id,
+        token: authToken,
         onStatus: setSocketState,
         onEvent(payload) {
           if (payload.type === "message:new" && payload.message) {
             appendMessage(payload.message);
           }
-          if (payload.type === "message:receipt" && payload.chatId && payload.messageId) {
-            updateMessageStatus(payload.chatId, payload.messageId, payload.status);
+          if (payload.type === "message:receipt" && payload.messageId) {
+            const chatId = Object.keys(useChatStore.getState().messagesByChat).find((key) =>
+              (useChatStore.getState().messagesByChat[key] || []).some((message) => message.id === payload.messageId)
+            );
+            if (chatId) {
+              updateMessageStatus(chatId, payload.messageId, payload.status);
+            }
           }
-          if (payload.type === "typing" && payload.chatId) {
-            setTyping(payload.chatId, payload.name || "Someone");
-            window.clearTimeout(window.__mathamotaTypingTimeout);
-            window.__mathamotaTypingTimeout = window.setTimeout(() => clearTyping(payload.chatId), 1800);
+          if ((payload.type === "typing" || payload.type === "typing:user") && payload.senderId) {
+            const state = useChatStore.getState();
+            const chat = state.chatsList.find((item) => item.receiverId === payload.senderId);
+            if (!chat) return;
+            setTyping(chat.id, chat.name);
+            window.clearTimeout(typingTimeouts.get(chat.id));
+            const timeout = window.setTimeout(() => clearTyping(chat.id), 1600);
+            typingTimeouts.set(chat.id, timeout);
+          }
+          if (payload.type === "user:status" && payload.userId) {
+            updateUserPresence(payload.userId, payload.isOnline, payload.lastSeen);
           }
         }
       });
@@ -112,8 +124,23 @@ export function useChatBootstrap() {
     bootstrap();
 
     return () => {
+      disposed = true;
+      typingTimeouts.forEach((timeout) => window.clearTimeout(timeout));
       setSocketSend(() => {});
       activeSocket?.close();
     };
-  }, [appendMessage, clearTyping, currentUser.id, initialize, setError, setSocketSend, setSocketState, setTyping, updateMessageStatus]);
+  }, [
+    appendMessage,
+    authToken,
+    clearTyping,
+    currentUser?.id,
+    initialize,
+    isAuthenticated,
+    setError,
+    setSocketSend,
+    setSocketState,
+    setTyping,
+    updateMessageStatus,
+    updateUserPresence
+  ]);
 }

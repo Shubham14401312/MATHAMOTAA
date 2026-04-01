@@ -1,8 +1,10 @@
 import { create } from "zustand";
-import { loadCachedState, saveCachedState } from "../lib/cache.js";
+import { clearAuthState, loadAuthState, loadCachedState, saveAuthState, saveCachedState } from "../lib/cache.js";
 import { mockChats, mockCurrentUser, mockMessages } from "../mockData.js";
+import { setApiToken } from "../services/api.js";
 
 const cached = loadCachedState();
+const authCached = loadAuthState();
 
 function sortMessages(items) {
   return [...items].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -13,12 +15,20 @@ function persist(state) {
     currentUser: state.currentUser,
     chatsList: state.chatsList,
     activeChatId: state.activeChatId,
-    messagesByChat: state.messagesByChat
+    messagesByChat: state.messagesByChat,
+    usersDirectory: state.usersDirectory
   });
 }
 
+if (authCached?.token) {
+  setApiToken(authCached.token);
+}
+
 export const useChatStore = create((set, get) => ({
-  currentUser: cached?.currentUser || mockCurrentUser,
+  currentUser: authCached?.user || cached?.currentUser || null,
+  authToken: authCached?.token || "",
+  isAuthenticated: Boolean(authCached?.token && authCached?.user),
+  usersDirectory: cached?.usersDirectory || [],
   chatsList: cached?.chatsList || mockChats,
   activeChatId: cached?.activeChatId || mockChats[0]?.id || null,
   messagesByChat: cached?.messagesByChat || mockMessages,
@@ -34,12 +44,50 @@ export const useChatStore = create((set, get) => ({
   initialize(payload) {
     const nextState = {
       currentUser: payload.currentUser,
+      usersDirectory: payload.usersDirectory || [],
       chatsList: payload.chatsList,
       activeChatId: payload.activeChatId || payload.chatsList[0]?.id || null,
       messagesByChat: payload.messagesByChat
     };
     set(nextState);
     persist({ ...get(), ...nextState });
+  },
+  setSession({ token, user }) {
+    setApiToken(token);
+    const nextState = {
+      authToken: token,
+      currentUser: user,
+      isAuthenticated: true
+    };
+    set(nextState);
+    saveAuthState({ token, user });
+    persist({ ...get(), ...nextState });
+  },
+  clearSession() {
+    setApiToken("");
+    clearAuthState();
+    set({
+      authToken: "",
+      currentUser: null,
+      isAuthenticated: false,
+      usersDirectory: [],
+      chatsList: [],
+      activeChatId: null,
+      messagesByChat: {},
+      mobileChatOpen: false
+    });
+    persist({
+      ...get(),
+      currentUser: null,
+      usersDirectory: [],
+      chatsList: [],
+      activeChatId: null,
+      messagesByChat: {}
+    });
+  },
+  setUsersDirectory(usersDirectory) {
+    set({ usersDirectory });
+    persist({ ...get(), usersDirectory });
   },
   setError(error) {
     set({ error });
@@ -69,24 +117,33 @@ export const useChatStore = create((set, get) => ({
       ...patch
     };
     set({ currentUser: nextCurrentUser });
+    saveAuthState({ token: state.authToken, user: nextCurrentUser });
     persist({ ...state, currentUser: nextCurrentUser });
   },
   createChat(name) {
     const state = get();
-    const trimmedName = name.trim();
+    const trimmedName = name.trim().toLowerCase();
     if (!trimmedName) return null;
-
-    const chatId = `chat-${trimmedName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`;
+    const targetUser = state.usersDirectory.find((user) => user.username === trimmedName);
+    if (!targetUser || !state.currentUser) return null;
+    const chatId = [state.currentUser.id, targetUser.id].sort().join(":");
+    const existing = state.chatsList.find((chat) => chat.id === chatId);
+    if (existing) {
+      set({ activeChatId: existing.id, mobileChatOpen: true });
+      return existing.id;
+    }
     const nextChat = {
       id: chatId,
       type: "direct",
-      name: trimmedName,
-      avatar: `https://api.dicebear.com/9.x/glass/svg?seed=${encodeURIComponent(trimmedName)}`,
-      online: true,
+      name: targetUser.name || targetUser.username,
+      avatar: targetUser.avatar,
+      online: Boolean(targetUser.isOnline),
       unreadCount: 0,
       lastMessage: "Start your conversation",
       lastMessageAt: new Date().toISOString(),
-      participants: [state.currentUser.id, `user-${chatId}`]
+      participants: [state.currentUser.id, targetUser.id],
+      receiverId: targetUser.id,
+      username: targetUser.username
     };
     const nextChats = [nextChat, ...state.chatsList];
     const nextMessages = {
@@ -138,19 +195,32 @@ export const useChatStore = create((set, get) => ({
       ...state.messagesByChat,
       [message.chatId]: sortMessages([...messages, message])
     };
-    const nextChats = state.chatsList.map((chat) =>
-      chat.id === message.chatId
-        ? {
-            ...chat,
-            lastMessage: message.type === "text" ? message.text : message.type,
-            lastMessageAt: message.timestamp,
-            unreadCount:
-              message.senderId !== state.currentUser.id ? (chat.unreadCount || 0) + 1 : chat.unreadCount || 0
-          }
-        : chat
-    );
+    const nextChats = state.chatsList.some((chat) => chat.id === message.chatId)
+      ? state.chatsList.map((chat) =>
+          chat.id === message.chatId
+            ? {
+                ...chat,
+                lastMessage: message.type === "text" ? message.text : message.type,
+                lastMessageAt: message.timestamp,
+                unreadCount:
+                  message.senderId !== state.currentUser?.id ? (chat.unreadCount || 0) + 1 : chat.unreadCount || 0
+              }
+            : chat
+        )
+      : state.chatsList;
     set({ messagesByChat: nextMessages, chatsList: nextChats });
     persist({ ...state, messagesByChat: nextMessages, chatsList: nextChats });
+  },
+  updateUserPresence(userId, isOnline, lastSeen) {
+    const state = get();
+    const nextUsers = state.usersDirectory.map((user) =>
+      user.id === userId ? { ...user, isOnline, lastSeen } : user
+    );
+    const nextChats = state.chatsList.map((chat) =>
+      chat.receiverId === userId ? { ...chat, online: isOnline, lastSeen } : chat
+    );
+    set({ usersDirectory: nextUsers, chatsList: nextChats });
+    persist({ ...state, usersDirectory: nextUsers, chatsList: nextChats });
   },
   simulateReceiptLifecycle(chatId, messageId) {
     setTimeout(() => get().updateMessageStatus(chatId, messageId, "delivered"), 1200);

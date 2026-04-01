@@ -229,14 +229,15 @@ function MessageComposer({ activeChat }) {
   } = useChatStore();
 
   function buildOutgoingMessage(partial) {
+    const targetUserId = activeChat.receiverId || activeChat.participants.find((item) => item !== currentUser.id) || activeChat.id;
     return {
       id: crypto.randomUUID(),
       message_ID: crypto.randomUUID(),
       chatId: activeChat.id,
       senderId: currentUser.id,
-      receiverId: activeChat.participants.find((item) => item !== currentUser.id) || activeChat.id,
+      receiverId: targetUserId,
       sender_ID: currentUser.id,
-      reciever_ID: activeChat.participants.find((item) => item !== currentUser.id) || activeChat.id,
+      reciever_ID: targetUserId,
       status: "sent",
       timestamp: new Date().toISOString(),
       ...partial
@@ -411,18 +412,14 @@ function MessageComposer({ activeChat }) {
 
   function handleDraftChange(value) {
     setDraft(value);
-    socketSend({
-      type: "typing",
-      chatId: activeChat.id,
-      name: currentUser.name
-    });
-    window.clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = window.setTimeout(() => {
+    if (activeChat.receiverId) {
       socketSend({
-        type: "typing:stop",
-        chatId: activeChat.id
+        type: "typing",
+        receiverId: activeChat.receiverId
       });
-    }, 1200);
+    }
+    window.clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = window.setTimeout(() => {}, 1200);
   }
 
   useEffect(() => {
@@ -541,15 +538,6 @@ export default function ChatWindow() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, activeChatId]);
-
-  useEffect(() => {
-    if (activeChatId) {
-      socketSend({
-        type: "room:join",
-        chatId: activeChatId
-      });
-    }
-  }, [activeChatId, socketSend]);
 
   if (!activeChat) {
     return (

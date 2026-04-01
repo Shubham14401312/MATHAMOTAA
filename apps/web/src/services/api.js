@@ -1,9 +1,15 @@
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin;
+let authToken = "";
+
+export function setApiToken(token) {
+  authToken = token || "";
+}
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
       Accept: "application/json",
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...options.headers
     },
@@ -27,6 +33,28 @@ export function sendMessage(payload) {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+export function register(payload) {
+  return request("/api/register", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function login(payload) {
+  return request("/api/login", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getCurrentUser() {
+  return request("/api/me");
+}
+
+export function getUsers() {
+  return request("/api/users");
 }
 
 export function getOfflineMessages(userId) {

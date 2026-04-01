@@ -1,5 +1,6 @@
 import {
   CirclePlus,
+  LogOut,
   MessageCircleMore,
   MessageSquareText,
   Search,
@@ -62,7 +63,9 @@ export default function Sidebar() {
     setSearchTerm,
     setOnlineOnly,
     selectChat,
-    createChat
+    createChat,
+    clearSession,
+    setError
   } = useChatStore();
 
   const filteredChats = useMemo(() => {
@@ -99,7 +102,11 @@ export default function Sidebar() {
             onClick={() => {
               const name = window.prompt("Enter the name for the new chat");
               if (!name?.trim()) return;
-              createChat(name);
+              const created = createChat(name);
+              if (!created) {
+                setError("That username was not found. Ask them to sign up first.");
+                return;
+              }
               navigate("/chat");
             }}
           >
@@ -121,6 +128,17 @@ export default function Sidebar() {
             onClick={() => navigate("/settings")}
           >
             <Settings className="h-5 w-5" />
+          </button>
+          <button
+            className="rounded-full p-2 hover:bg-white"
+            type="button"
+            aria-label="Logout"
+            onClick={() => {
+              clearSession();
+              navigate("/auth");
+            }}
+          >
+            <LogOut className="h-5 w-5" />
           </button>
         </div>
       </header>

@@ -46,11 +46,13 @@ function normalizeUser(user) {
   if (!user) return null;
   return {
     id: user.id,
-    email: user.email,
-    name: user.name,
+    username: user.username,
+    name: user.name || user.username,
     avatar: user.avatar || "Bloom",
     tokenPiece: user.tokenPiece || "\u2728",
-    createdAt: user.createdAt
+    createdAt: user.createdAt,
+    lastSeen: user.lastSeen || user.createdAt,
+    isOnline: Boolean(user.isOnline)
   };
 }
 
@@ -63,19 +65,26 @@ function chatParticipants(state, chat) {
 
 export function getUserByEmail(email) {
   const state = readState();
-  return state.users.find((user) => user.email.toLowerCase() === email.toLowerCase()) || null;
+  return state.users.find((user) => (user.email || "").toLowerCase() === email.toLowerCase()) || null;
 }
 
-export function createUser({ email, passwordHash, name, avatar = "Bloom", tokenPiece = "\u2728" }) {
+export function getUserByUsername(username) {
+  const state = readState();
+  return state.users.find((user) => (user.username || "").toLowerCase() === username.toLowerCase()) || null;
+}
+
+export function createUser({ username, passwordHash, name, avatar = "Bloom", tokenPiece = "\u2728" }) {
   const state = readState();
   const user = {
     id: uuid(),
-    email,
+    username,
     passwordHash,
-    name,
+    name: name || username,
     avatar,
     tokenPiece,
-    createdAt: now()
+    createdAt: now(),
+    lastSeen: now(),
+    isOnline: false
   };
   state.users.push(user);
   writeState(state);
@@ -96,6 +105,21 @@ export function updateUserProfile(userId, profile) {
 export function getUserById(id) {
   const state = readState();
   const user = state.users.find((item) => item.id === id);
+  return normalizeUser(user);
+}
+
+export function getAllUsers() {
+  const state = readState();
+  return state.users.map(normalizeUser);
+}
+
+export function setUserPresence(userId, isOnline) {
+  const state = readState();
+  const user = state.users.find((item) => item.id === userId);
+  if (!user) return null;
+  user.isOnline = Boolean(isOnline);
+  user.lastSeen = now();
+  writeState(state);
   return normalizeUser(user);
 }
 

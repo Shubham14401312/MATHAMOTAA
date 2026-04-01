@@ -2,7 +2,7 @@ import { io } from "socket.io-client";
 
 const WS_BASE = import.meta.env.VITE_WS_URL || window.location.origin;
 
-export function connectSocket({ userId, onStatus, onEvent }) {
+export function connectSocket({ token, onStatus, onEvent }) {
   if (!WS_BASE) {
     onStatus("offline");
     return { close() {}, send() {} };
@@ -10,8 +10,8 @@ export function connectSocket({ userId, onStatus, onEvent }) {
 
   const socket = io(WS_BASE, {
     transports: ["websocket"],
-    query: {
-      userId
+    auth: {
+      token
     }
   });
 
@@ -46,6 +46,36 @@ export function connectSocket({ userId, onStatus, onEvent }) {
     onEvent({ type: "typing", ...payload });
   });
 
+  socket.on("userTyping", (payload) => {
+    onEvent({ type: "typing:user", ...payload });
+  });
+
+  socket.on("messageStatus", (payload) => {
+    onEvent({ type: "message:receipt", ...payload });
+  });
+
+  socket.on("userStatusUpdate", (payload) => {
+    onEvent({ type: "user:status", ...payload });
+  });
+
+  socket.on("receiveMessage", (message) => {
+    onEvent({
+      type: "message:new",
+      message: {
+        id: message.message_ID || message.id,
+        chatId: message.chatId,
+        senderId: message.sender_ID || message.senderId,
+        receiverId: message.reciever_ID || message.receiverId,
+        type: message.type || "text",
+        text: message.text || "",
+        media: message.media_object || null,
+        document: message.document || null,
+        status: message.status || "delivered",
+        timestamp: message.timestamp || new Date().toISOString()
+      }
+    });
+  });
+
   return {
     close() {
       socket.close();
@@ -54,13 +84,12 @@ export function connectSocket({ userId, onStatus, onEvent }) {
       if (!payload?.type) return;
       if (payload.type === "typing") {
         socket.emit("typing", {
-          chatId: payload.chatId,
-          name: payload.name
+          receiverId: payload.receiverId
         });
       }
-      if (payload.type === "room:join") {
-        socket.emit("room:join", {
-          chatId: payload.chatId
+      if (payload.type === "chat:read") {
+        socket.emit("chat:read", {
+          senderId: payload.senderId
         });
       }
       if (payload.type === "message:send") {
